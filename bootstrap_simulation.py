@@ -150,7 +150,7 @@ def calculate_filter_thresholds(
     window_days: int = 7
 ) -> dict[str, float]:
     """
-    Calculate filter threshold for each district.
+    Calculate filter threshold for each district using last `window_days` calendar days.
     
     Parameters
     ----------
@@ -159,7 +159,7 @@ def calculate_filter_thresholds(
     quantile : float
         Quantile to use for threshold (default: 0.5 for median)
     window_days : int
-        Number of days to look back (default: 7)
+        Number of calendar days to look back (default: 7)
         
     Returns
     -------
@@ -189,25 +189,42 @@ def calculate_filter_thresholds(
         if len(district_data) == 0:
             thresholds[district] = 0.0
             continue
-        
-        # Get last window_days days with recorded data
-        unique_dates = district_data["To_Date"].unique()
-        unique_dates = sorted(unique_dates)
-        
-        if len(unique_dates) == 0:
+
+        # Work over CALENDAR days, but ignore zero-activity days for the filter.
+        district_data = district_data.copy()
+        district_data["To_Date"] = pd.to_datetime(district_data["To_Date"])
+        if district_data["To_Date"].isnull().all():
             thresholds[district] = 0.0
             continue
-        
-        # Take last window_days unique dates
-        last_dates = unique_dates[-window_days:] if len(unique_dates) >= window_days else unique_dates
-        
-        # Extract Added values from those dates
-        recent_added = district_data[district_data["To_Date"].isin(last_dates)]["Added"].tolist()
-        
-        if len(recent_added) == 0:
+        max_date = district_data["To_Date"].max()
+        min_date = district_data["To_Date"].min()
+        if pd.isnull(max_date) or pd.isnull(min_date):
+            thresholds[district] = 0.0
+            continue
+
+        # Aggregate to per-calendar-day totals for this district
+        per_day_added = (
+            district_data.groupby(district_data["To_Date"].dt.normalize())["Added"]
+            .sum()
+        )
+        date_index = pd.date_range(start=min_date.normalize(), end=max_date.normalize(), freq="D")
+        per_day_added_calendar = per_day_added.reindex(date_index, fill_value=0)
+
+        # Take the last `window_days` CALENDAR days (or all days if fewer exist),
+        # then drop zero-activity days before computing the quantile.
+        if len(per_day_added_calendar) == 0:
+            thresholds[district] = 0.0
+            continue
+        if window_days > len(per_day_added_calendar):
+            window_values = per_day_added_calendar.values
+        else:
+            window_values = per_day_added_calendar.values[-window_days:]
+
+        positive_values = window_values[window_values > 0]
+        if positive_values.size == 0:
             thresholds[district] = 0.0
         else:
-            threshold = np.quantile(recent_added, quantile)
+            threshold = np.quantile(positive_values, quantile)
             thresholds[district] = float(threshold)
     
     return thresholds
@@ -672,11 +689,20 @@ def plot_parameter_summary(
     }).reset_index()
     
     # Calculate diagnostic filter threshold from overall daily totals (if filtered mode)
+    # Use the last `filter_window` calendar days, but ignore zero-activity days
     filter_threshold = None
     if filter_quantile is not None and filter_window is not None:
-        if len(daily_totals) >= filter_window:
-            last_days = daily_totals.tail(filter_window)["Added"].values
-            filter_threshold = float(np.quantile(last_days, filter_quantile))
+        if not daily_totals.empty:
+            last_date = daily_totals["To_Date"].max()
+            date_range = pd.date_range(end=last_date, periods=filter_window)
+            # Reindex to calendar days (to respect calendar windows), then ignore zero days
+            daily_totals_calendar = daily_totals.set_index("To_Date").reindex(date_range, fill_value=0)
+            last_days = daily_totals_calendar["Added"].values
+            positive_days = last_days[last_days > 0]
+            if positive_days.size > 0:
+                filter_threshold = float(np.quantile(positive_days, filter_quantile))
+            else:
+                filter_threshold = 0.0
     
     # Create figure with two panels (upper: additions, lower: removals)
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
@@ -901,7 +927,7 @@ def main() -> int:
     
     # Histogram 1: Statewide totals
     statewide_path = output_dir / f"{mode_label}_statewide_histogram.{args.format}"
-    # Calculate bins that are always 5000 wide
+    # Calculate bins that are always a particular width 
     min_val = min(statewide_totals) if statewide_totals else 0
     max_val = max(statewide_totals) if statewide_totals else 0
     BIN_WIDTH = 1000
