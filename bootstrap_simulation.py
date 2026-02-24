@@ -3,7 +3,7 @@
 Monte Carlo bootstrap simulation for signature processing.
 
 Projects final signature counts per district accounting for:
-- Future signature verification through gathering deadline
+- Future signature verification through verification deadline
 - Signature removals through removal deadline (45-day window)
 - Two sampling modes: naive (all historical data) and filtered (filtered by threshold)
 """
@@ -245,7 +245,7 @@ def build_filtered_pools(
 
 def run_single_trial(
     data: SimulationData,
-    gathering_deadline: date,
+    verification_deadline: date,
     removal_deadline: date,
     removal_window_days: int,
     use_filtered: bool = False,
@@ -258,7 +258,7 @@ def run_single_trial(
     ----------
     data : SimulationData
         Preprocessed data structures
-    gathering_deadline : date
+    verification_deadline : date
         Last day for signature verification
     removal_deadline : date
         Last day for signature removal
@@ -289,9 +289,9 @@ def run_single_trial(
     # Structure: district -> list of (date, count) tuples
     verification_history: dict[str, list[tuple[date, int]]] = defaultdict(list)
     
-    # Phase 1: Signature Verification (start_date through gathering_deadline)
+    # Phase 1: Signature Verification (start_date through verification_deadline)
     current_date = data.start_date
-    while current_date <= gathering_deadline:
+    while current_date <= verification_deadline:
         for district in all_districts:
             # Get sampling pool for this district
             pool = added_pools.get(district, [0])
@@ -357,7 +357,7 @@ def run_single_trial(
 def run_simulation(
     data: SimulationData,
     n_trials: int,
-    gathering_deadline: date,
+    verification_deadline: date,
     removal_deadline: date,
     removal_window_days: int,
     use_filtered: bool = False,
@@ -373,7 +373,7 @@ def run_simulation(
         Preprocessed data structures
     n_trials : int
         Number of Monte Carlo trials
-    gathering_deadline : date
+    verification_deadline : date
         Last day for signature verification
     removal_deadline : date
         Last day for signature removal
@@ -407,7 +407,7 @@ def run_simulation(
         )
 
     n_districts = len(all_districts)
-    n_verification_days = (gathering_deadline - data.start_date).days + 1
+    n_verification_days = (verification_deadline - data.start_date).days + 1
     n_verification_days = max(0, n_verification_days)
     n_removal_days = (removal_deadline - data.start_date).days + 1
     n_removal_days = max(0, n_removal_days)
@@ -753,10 +753,10 @@ def main() -> int:
         help="Days for filter threshold calculation"
     )
     parser.add_argument(
-        "--gathering-deadline",
+        "--verification-deadline",
         type=str,
         default="2026-03-08",
-        help="Gathering deadline date (default: 2026-03-08)"
+        help="Verification deadline date (default: 2026-03-08)"
     )
     parser.add_argument(
         "--removal-deadline",
@@ -813,7 +813,7 @@ def main() -> int:
         return 1
     
     try:
-        gathering_deadline = date.fromisoformat(args.gathering_deadline)
+        verification_deadline = date.fromisoformat(args.verification_deadline)
         removal_deadline = date.fromisoformat(args.removal_deadline)
         removal_cutoff_date = date.fromisoformat(args.removal_cutoff_date)
     except ValueError as e:
@@ -856,7 +856,7 @@ def main() -> int:
     aggregated_results = run_simulation(
         data,
         args.trials,
-        gathering_deadline,
+        verification_deadline,
         removal_deadline,
         removal_window_days=45,
         use_filtered=use_filtered,
