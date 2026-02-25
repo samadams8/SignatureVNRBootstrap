@@ -19,6 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 import matplotlib.dates as mdates
+from bootstrap_simulation import DISTRICT_TARGETS, STATEWIDE_TARGET
 
 
 def load_and_split(csv_path: Path) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[str, str]]]:
@@ -103,15 +104,26 @@ def plot_two_panel(
     title: str,
     out_path: Path,
     fmt: str = "png",
+    target_line: float | None = None,
 ) -> None:
     """Create a two-panel figure: top = accumulation over time, bottom = added/removed per day (double bar chart)."""
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, sharex=False, figsize=(10, 6))
 
     # Top: accumulation over time
-    ax_top.plot(acc_dates, acc_cum, marker="o", markersize=3)
+    ax_top.plot(acc_dates, acc_cum, marker="o", markersize=3, label="Cumulative signatures")
+    if target_line is not None:
+        ax_top.axhline(
+            y=target_line,
+            linestyle="--",
+            color="red",
+            linewidth=1,
+            label="Target quota",
+        )
     ax_top.set_ylabel("Cumulative signatures")
     ax_top.set_title("Signature accumulation over time")
     ax_top.grid(True, alpha=0.3)
+    if target_line is not None:
+        ax_top.legend(loc="upper left")
     ax_top.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     ax_top.xaxis.set_major_locator(mdates.AutoDateLocator())
     plt.setp(ax_top.xaxis.get_majorticklabels(), rotation=45, ha="right")
@@ -157,6 +169,32 @@ def plot_removal_rate(
     plt.close(fig)
 
 
+def plot_progress_to_target(
+    districts: list[str],
+    percent_of_target: list[float],
+    out_path: Path,
+    fmt: str = "png",
+) -> None:
+    """Bar chart showing percent of target reached by district."""
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x = range(len(districts))
+    ax.bar(x, percent_of_target, alpha=0.7, color="steelblue")
+    ax.axhline(100.0, color="red", linestyle="--", linewidth=1, label="Target (100%)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(districts, rotation=45, ha="right")
+    ax.set_ylabel("Percent of target reached")
+    ax.set_xlabel("Senate district")
+    ax.set_title("Progress toward signature targets by district")
+    if percent_of_target:
+        ymax = max(percent_of_target)
+        ax.set_ylim(0, max(110.0, ymax * 1.05))
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, format=fmt, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", type=Path, default=Path("signature_changes_by_district.csv"), help="Input CSV path")
@@ -186,18 +224,61 @@ def main() -> int:
     )
 
     # Two-panel figure per district
+    current_counts: dict[str, int] = {}
     for d in district_list:
         acc_dates, acc_cum, daily_dates, added_values, removed_values = build_series(initial, transitions, ordered_pairs, d)
         if not acc_dates:
             continue
+        current_counts[d] = int(acc_cum[-1])
+        target = DISTRICT_TARGETS.get(int(d))
         out_path = out_dir / f"district_{int(d):02d}.{fmt}"
-        plot_two_panel(acc_dates, acc_cum, daily_dates, added_values, removed_values, f"District {d}", out_path, fmt)
+        plot_two_panel(
+            acc_dates,
+            acc_cum,
+            daily_dates,
+            added_values,
+            removed_values,
+            f"District {d}",
+            out_path,
+            fmt,
+            target_line=float(target) if target is not None else None,
+        )
 
     # Overall two-panel
     acc_dates, acc_cum, daily_dates, added_values, removed_values = build_series(initial, transitions, ordered_pairs, None)
     if acc_dates:
         out_path = out_dir / f"overall.{fmt}"
-        plot_two_panel(acc_dates, acc_cum, daily_dates, added_values, removed_values, "Overall", out_path, fmt)
+        plot_two_panel(
+            acc_dates,
+            acc_cum,
+            daily_dates,
+            added_values,
+            removed_values,
+            "Overall",
+            out_path,
+            fmt,
+            target_line=float(STATEWIDE_TARGET),
+        )
+
+    # Progress toward targets figure
+    progress_labels: list[str] = []
+    progress_pct: list[float] = []
+    for d in district_list:
+        target = DISTRICT_TARGETS.get(int(d))
+        current = current_counts.get(d, 0)
+        if target and target > 0:
+            pct = 100.0 * current / float(target)
+        else:
+            pct = 0.0
+        progress_labels.append(d)
+        progress_pct.append(pct)
+
+    plot_progress_to_target(
+        progress_labels,
+        progress_pct,
+        out_dir / f"progress_to_target_by_district.{fmt}",
+        fmt,
+    )
 
     # Removal rate by district
     removal_rates = []
