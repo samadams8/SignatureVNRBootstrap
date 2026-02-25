@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
+import pandas as pd
+
 # Optional for type hints only
 try:
     from lxml import etree
@@ -26,7 +28,7 @@ except ImportError:
 
 
 CSV_COLUMNS = ("From_Date", "To_Date", "Senate_District", "Added", "Removed")
-DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})\.html$")
+DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})\.(html|xlsx)$", re.IGNORECASE)
 
 
 class Snapshot(NamedTuple):
@@ -43,20 +45,32 @@ class ParseStats(NamedTuple):
     duplicate_ids: int
 
 
-def get_sorted_dates(html_dir: Path) -> list[str]:
-    """Discover YYYY-MM-DD.html files in html_dir and return sorted date strings."""
-    dates: list[str] = []
+def discover_snapshot_files(html_dir: Path) -> dict[str, Path]:
+    """
+    Discover YYYY-MM-DD.(html|xlsx) files in html_dir.
+
+    Returns mapping of date string -> Path. If both HTML and XLSX exist
+    for a given date, XLSX is preferred.
+    """
+    snapshots: dict[str, Path] = {}
     for p in html_dir.iterdir():
-        if not p.is_file() or p.suffix.lower() != ".html":
+        if not p.is_file():
             continue
         m = DATE_PATTERN.search(p.name)
-        if m:
-            dates.append(m.group(1))
-    dates.sort()
-    return dates
+        if not m:
+            continue
+        date = m.group(1)
+        existing = snapshots.get(date)
+        if existing is None:
+            snapshots[date] = p
+        else:
+            # Prefer XLSX over HTML if both are present
+            if existing.suffix.lower() == ".html" and p.suffix.lower() == ".xlsx":
+                snapshots[date] = p
+    return snapshots
 
 
-def parse_signers_table(filepath: Path) -> tuple[Snapshot, ParseStats]:
+def parse_signers_table_html(filepath: Path) -> tuple[Snapshot, ParseStats]:
     """
     Parse the signer table from one HTML file; return snapshot and discrepancy counts.
 
@@ -102,6 +116,56 @@ def parse_signers_table(filepath: Path) -> tuple[Snapshot, ParseStats]:
     return Snapshot(ids=ids_set, id_to_district=id_to_district), ParseStats(
         malformed_rows=malformed, duplicate_ids=duplicate_count
     )
+
+
+def parse_signers_table_excel(filepath: Path) -> tuple[Snapshot, ParseStats]:
+    malformed = 0
+    seen_ids: set[str] = set()
+    duplicate_count = 0
+    id_to_district: dict[str, str] = {}
+    ids_set: set[str] = set()
+
+    df = pd.read_excel(filepath)
+
+    normalized_columns = {str(c).strip().lower(): c for c in df.columns}
+    try:
+        voter_col = normalized_columns["voter id"]
+        district_col = normalized_columns["senate district"]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Expected 'Voter ID' and 'Senate District' columns in {filepath.name}"
+        ) from exc
+
+    for _, row in df.iterrows():
+        voter_val = row[voter_col]
+        district_val = row[district_col]
+
+        voter_id = str(voter_val).strip() if pd.notna(voter_val) else ""
+        district = str(district_val).strip() if pd.notna(district_val) else ""
+
+        if not voter_id:
+            malformed += 1
+            continue
+
+        if voter_id in seen_ids:
+            duplicate_count += 1
+        seen_ids.add(voter_id)
+
+        id_to_district[voter_id] = district
+        ids_set.add(voter_id)
+
+    return Snapshot(ids=ids_set, id_to_district=id_to_district), ParseStats(
+        malformed_rows=malformed, duplicate_ids=duplicate_count
+    )
+
+
+def parse_signers_table(filepath: Path) -> tuple[Snapshot, ParseStats]:
+    suffix = filepath.suffix.lower()
+    if suffix == ".xlsx":
+        return parse_signers_table_excel(filepath)
+    if suffix in {".html", ".htm"}:
+        return parse_signers_table_html(filepath)
+    raise RuntimeError(f"Unsupported snapshot file type: {filepath}")
 
 
 def compute_initial_rows(first_date: str, snapshot: Snapshot) -> list[tuple[str, str, str, int, int]]:
@@ -243,7 +307,8 @@ def main() -> int:
         print(f"Error: HTML directory not found: {html_dir}", file=sys.stderr)
         return 1
 
-    dates = get_sorted_dates(html_dir)
+    date_to_path = discover_snapshot_files(html_dir)
+    dates = sorted(date_to_path.keys())
     if len(dates) == 0:
         print("No date files found.", file=sys.stderr)
         return 0
@@ -271,8 +336,8 @@ def main() -> int:
 
     # Compute initial rows if needed
     if need_initial:
-        first_path = html_dir / f"{first_date}.html"
-        if first_path.exists():
+        first_path = date_to_path.get(first_date)
+        if first_path is not None and first_path.exists():
             first_snap, first_stats = parse_signers_table(first_path)
             malformed_total += first_stats.malformed_rows
             duplicate_total += first_stats.duplicate_ids
@@ -290,9 +355,9 @@ def main() -> int:
         dates_to_load.add(b)
 
     for from_date, to_date in new_pairs:
-        from_path = html_dir / f"{from_date}.html"
-        to_path = html_dir / f"{to_date}.html"
-        if not from_path.exists() or not to_path.exists():
+        from_path = date_to_path.get(from_date)
+        to_path = date_to_path.get(to_date)
+        if from_path is None or to_path is None or not from_path.exists() or not to_path.exists():
             print(f"Warning: Missing file for transition {from_date} -> {to_date}", file=sys.stderr)
             continue
 
