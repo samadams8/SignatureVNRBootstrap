@@ -58,6 +58,13 @@ class AggregatedResults(NamedTuple):
     districts_meeting: list[int]  # Number of districts meeting targets per trial
     district_success_counts: dict[str, int]  # District -> number of trials meeting target
 
+
+def get_business_days(start: date, end: date) -> list[date]:
+    """Return business days (Mon-Fri) from start to end, inclusive."""
+    if end < start:
+        return []
+    return [d.date() for d in pd.bdate_range(start=start, end=end)]
+
 def load_data(csv_path: Path, removal_cutoff_date: date | None = None) -> SimulationData:
     """
     Load CSV and prepare data structures for simulation.
@@ -306,9 +313,11 @@ def run_single_trial(
     # Structure: district -> list of (date, count) tuples
     verification_history: dict[str, list[tuple[date, int]]] = defaultdict(list)
     
-    # Phase 1: Signature Verification (start_date through verification_deadline)
-    current_date = data.start_date
-    while current_date <= verification_deadline:
+    verification_days = get_business_days(data.start_date, verification_deadline)
+    removal_days = get_business_days(data.start_date, removal_deadline)
+
+    # Phase 1: Signature Verification (business days only)
+    for current_date in verification_days:
         for district in all_districts:
             # Get sampling pool for this district
             pool = added_pools.get(district, [0])
@@ -322,14 +331,11 @@ def run_single_trial(
             # Track verification date for removable pool
             if sampled_added > 0:
                 verification_history[district].append((current_date, sampled_added))
-        
-        current_date += timedelta(days=1)
     
     # Phase 2: Signature Removals (start_date through removal_deadline)
     # Skip this phase if removals are disabled
     if not disable_removals:
-        current_date = data.start_date
-        while current_date <= removal_deadline:
+        for current_date in removal_days:
             for district in all_districts:
                 # Calculate removable pool: signatures verified within last removal_window_days (including same day)
                 # If removal_window_days=45, we want days (current_date - 44) through current_date (inclusive)
@@ -352,8 +358,6 @@ def run_single_trial(
                 
                 # Subtract from running total
                 current_counts[district] -= actual_removed
-            
-            current_date += timedelta(days=1)
     
     # Calculate results
     total_statewide = sum(current_counts.values())
@@ -424,10 +428,10 @@ def run_simulation(
         )
 
     n_districts = len(all_districts)
-    n_verification_days = (verification_deadline - data.start_date).days + 1
-    n_verification_days = max(0, n_verification_days)
-    n_removal_days = (removal_deadline - data.start_date).days + 1
-    n_removal_days = max(0, n_removal_days)
+    verification_days = get_business_days(data.start_date, verification_deadline)
+    removal_days = get_business_days(data.start_date, removal_deadline)
+    n_verification_days = len(verification_days)
+    n_removal_days = len(removal_days)
 
     initial_counts = np.array(
         [data.naive_counts.get(district, 0) for district in all_districts],
@@ -469,8 +473,16 @@ def run_simulation(
                 axis=1
             )
 
-            cutoff_indices = np.arange(n_removal_days) - (removal_window_days - 1)
-            clipped_cutoff_indices = np.clip(cutoff_indices, 0, n_verification_days)
+            verification_days_arr = np.array(verification_days, dtype="datetime64[D]")
+            cutoff_dates_arr = np.array(
+                [d - timedelta(days=removal_window_days - 1) for d in removal_days],
+                dtype="datetime64[D]"
+            )
+            clipped_cutoff_indices = np.searchsorted(
+                verification_days_arr,
+                cutoff_dates_arr,
+                side="left"
+            )
             removable_pool_by_day = suffix_with_zero[:, clipped_cutoff_indices]
 
         district_counts = final_counts_matrix[:, district_idx].copy()
