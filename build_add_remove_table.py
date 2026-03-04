@@ -2,9 +2,13 @@
 """
 Build CSV of unique Voter IDs added/removed by senate district between consecutive scrape dates.
 
-Reads HTML snapshots from HTMLs/ (one file per date), computes day-over-day deltas per
-district, and writes or appends to signature_changes_by_district.csv. Re-runs only
-process date transitions not already present in the CSV.
+Reads HTML/XLSX snapshots from HTMLs/ (one file per date), computes day-over-day deltas per
+district, and writes a fully rebuilt signature_changes_by_district.csv.
+
+Output guarantees one row per district for every date entry:
+- Initial rows: (From_Date="", To_Date=<first_date>) for every district.
+- Transition rows: one row per district for each consecutive (From_Date, To_Date),
+  including 0/0 rows when no voter IDs changed in that district.
 """
 
 from __future__ import annotations
@@ -168,11 +172,16 @@ def parse_signers_table(filepath: Path) -> tuple[Snapshot, ParseStats]:
     raise RuntimeError(f"Unsupported snapshot file type: {filepath}")
 
 
-def compute_initial_rows(first_date: str, snapshot: Snapshot) -> list[tuple[str, str, str, int, int]]:
+def compute_initial_rows(
+    first_date: str,
+    snapshot: Snapshot,
+    all_districts: list[str],
+) -> list[tuple[str, str, str, int, int]]:
     """
     Compute initial rows showing signature counts per district on the first date.
     
-    Returns list of ("", first_date, Senate_District, Added=count, Removed=0).
+    Returns list of ("", first_date, Senate_District, Added=count, Removed=0)
+    for every district in all_districts.
     """
     district_counts: dict[str, int] = {}
     for vid, district in snapshot.id_to_district.items():
@@ -180,22 +189,21 @@ def compute_initial_rows(first_date: str, snapshot: Snapshot) -> list[tuple[str,
             district_counts[district] = district_counts.get(district, 0) + 1
     
     rows: list[tuple[str, str, str, int, int]] = []
-    for district in sorted(district_counts.keys()):
-        rows.append(("", first_date, district, district_counts[district], 0))
+    for district in all_districts:
+        rows.append(("", first_date, district, district_counts.get(district, 0), 0))
     return rows
 
 
 def compute_transition(
-    prev_date: str,
-    curr_date: str,
     prev: Snapshot,
     curr: Snapshot,
-) -> tuple[list[tuple[str, str, str, int, int]], int]:
+) -> tuple[dict[str, int], dict[str, int], int]:
     """
     Compute added/removed counts per district for one date transition.
 
-    Returns list of (From_Date, To_Date, Senate_District, Added, Removed) and
-    count of voter IDs that appeared on both dates with different district.
+    Returns (added_by_district, removed_by_district, district_change_count),
+    where district_change_count is the number of voter IDs that appeared on both
+    dates with different district values.
     """
     prev_ids = prev.ids
     curr_ids = curr.ids
@@ -216,88 +224,24 @@ def compute_transition(
         if d:
             removed_by_district[d] = removed_by_district.get(d, 0) + 1
 
-    # All districts that had any add or remove
-    all_districts = sorted(set(added_by_district) | set(removed_by_district))
-
     district_changes = 0
     both = prev_ids & curr_ids
     for vid in both:
         if prev.id_to_district.get(vid) != curr.id_to_district.get(vid):
             district_changes += 1
 
-    rows: list[tuple[str, str, str, int, int]] = []
-    for d in all_districts:
-        rows.append((
-            prev_date,
-            curr_date,
-            d,
-            added_by_district.get(d, 0),
-            removed_by_district.get(d, 0),
-        ))
-    return rows, district_changes
-
-
-def read_existing_transitions(csv_path: Path) -> tuple[set[tuple[str, str]], bool]:
-    """
-    Stream CSV and return set of (From_Date, To_Date) already present, and whether initial rows exist.
-    
-    Returns (existing_transitions_set, has_initial_rows).
-    Initial rows are those with empty From_Date.
-    """
-    existing: set[tuple[str, str]] = set()
-    has_initial = False
-    if not csv_path.exists():
-        return existing, has_initial
-    with csv_path.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames and reader.fieldnames[:2] != list(CSV_COLUMNS[:2]):
-            return existing, has_initial
-        for row in reader:
-            from_d = (row.get("From_Date") or "").strip()
-            to_d = (row.get("To_Date") or "").strip()
-            if not from_d and to_d:
-                has_initial = True
-            elif from_d and to_d:
-                existing.add((from_d, to_d))
-    return existing, has_initial
-
-
-def append_new_rows_to_csv(csv_path: Path, new_rows: list[tuple[str, str, str, int, int]]) -> None:
-    """
-    Append new rows to existing CSV without loading full file into memory.
-
-    Streams existing content to a temp file, appends new rows, then replaces original.
-    """
-    if not new_rows:
-        return
-    temp_path = csv_path.with_suffix(csv_path.suffix + ".tmp")
-    try:
-        with csv_path.open("r", newline="", encoding="utf-8") as inf:
-            reader = csv.reader(inf)
-            with temp_path.open("w", newline="", encoding="utf-8") as outf:
-                writer = csv.writer(outf)
-                next(reader, None)  # skip existing header
-                writer.writerow(CSV_COLUMNS)
-                for row in reader:
-                    writer.writerow(row)
-                for r in new_rows:
-                    writer.writerow(r)
-        temp_path.replace(csv_path)
-    except FileNotFoundError:
-        with csv_path.open("w", newline="", encoding="utf-8") as outf:
-            writer = csv.writer(outf)
-            writer.writerow(CSV_COLUMNS)
-            for r in new_rows:
-                writer.writerow(r)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink(missing_ok=True)
+    return added_by_district, removed_by_district, district_changes
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", type=Path, default=Path("signature_changes_by_district.csv"), help="Output CSV path")
-    parser.add_argument("--html-dir", type=Path, default=Path("HTMLs"), help="Directory containing YYYY-MM-DD.html files")
+    parser.add_argument(
+        "--html-dir",
+        type=Path,
+        default=Path("HTMLs"),
+        help="Directory containing YYYY-MM-DD HTML/XLSX snapshot files",
+    )
     args = parser.parse_args()
 
     html_dir = args.html_dir.resolve()
@@ -315,130 +259,82 @@ def main() -> int:
     
     first_date = dates[0]
 
-    existing_pairs, has_initial_rows = read_existing_transitions(csv_path)
-    consecutive_pairs = [(dates[i], dates[i + 1]) for i in range(len(dates) - 1)]
-    new_pairs = [p for p in consecutive_pairs if p not in existing_pairs]
-
-    # Check if we need initial rows
-    need_initial = not has_initial_rows
-    need_transitions = len(new_pairs) > 0
-
-    if not need_initial and not need_transitions:
-        print("No new date transitions to compute. CSV is up to date.")
-        return 0
-
     # Collect discrepancy messages
     malformed_total = 0
     duplicate_total = 0
     district_change_total = 0
-    all_new_rows: list[tuple[str, str, str, int, int]] = []
-    initial_rows: list[tuple[str, str, str, int, int]] = []
 
-    # Compute initial rows if needed
-    if need_initial:
-        first_path = date_to_path.get(first_date)
-        if first_path is not None and first_path.exists():
-            first_snap, first_stats = parse_signers_table(first_path)
-            malformed_total += first_stats.malformed_rows
-            duplicate_total += first_stats.duplicate_ids
-            if first_stats.malformed_rows:
-                print(f"Skipped {first_stats.malformed_rows} malformed row(s) in {first_path.name}.", file=sys.stderr)
-            if first_stats.duplicate_ids:
-                print(f"Deduplicated {first_stats.duplicate_ids} duplicate Voter ID(s) in {first_path.name}.", file=sys.stderr)
-            initial_rows = compute_initial_rows(first_date, first_snap)
-            del first_snap
+    first_path = date_to_path.get(first_date)
+    if first_path is None or not first_path.exists():
+        print(f"Error: Missing file for first date {first_date}", file=sys.stderr)
+        return 1
 
-    # Dates we need to parse: any date that appears in a new transition
-    dates_to_load = set()
-    for a, b in new_pairs:
-        dates_to_load.add(a)
-        dates_to_load.add(b)
+    first_snap, first_stats = parse_signers_table(first_path)
+    malformed_total += first_stats.malformed_rows
+    duplicate_total += first_stats.duplicate_ids
+    if first_stats.malformed_rows:
+        print(f"Skipped {first_stats.malformed_rows} malformed row(s) in {first_path.name}.", file=sys.stderr)
+    if first_stats.duplicate_ids:
+        print(f"Deduplicated {first_stats.duplicate_ids} duplicate Voter ID(s) in {first_path.name}.", file=sys.stderr)
 
-    for from_date, to_date in new_pairs:
-        from_path = date_to_path.get(from_date)
-        to_path = date_to_path.get(to_date)
-        if from_path is None or to_path is None or not from_path.exists() or not to_path.exists():
+    prev_snap = first_snap
+
+    district_universe: set[str] = {d for d in prev_snap.id_to_district.values() if d}
+    transition_results: list[tuple[str, str, dict[str, int], dict[str, int]]] = []
+
+    for idx in range(1, len(dates)):
+        from_date = dates[idx - 1]
+        to_date = dates[idx]
+        curr_path = date_to_path.get(to_date)
+        if curr_path is None or not curr_path.exists():
             print(f"Warning: Missing file for transition {from_date} -> {to_date}", file=sys.stderr)
             continue
 
-        prev_snap, prev_stats = parse_signers_table(from_path)
-        malformed_total += prev_stats.malformed_rows
-        duplicate_total += prev_stats.duplicate_ids
-        if prev_stats.malformed_rows:
-            print(f"Skipped {prev_stats.malformed_rows} malformed row(s) in {from_path.name}.", file=sys.stderr)
-        if prev_stats.duplicate_ids:
-            print(f"Deduplicated {prev_stats.duplicate_ids} duplicate Voter ID(s) in {from_path.name}.", file=sys.stderr)
-
-        curr_snap, curr_stats = parse_signers_table(to_path)
+        curr_snap, curr_stats = parse_signers_table(curr_path)
         malformed_total += curr_stats.malformed_rows
         duplicate_total += curr_stats.duplicate_ids
         if curr_stats.malformed_rows:
-            print(f"Skipped {curr_stats.malformed_rows} malformed row(s) in {to_path.name}.", file=sys.stderr)
+            print(f"Skipped {curr_stats.malformed_rows} malformed row(s) in {curr_path.name}.", file=sys.stderr)
         if curr_stats.duplicate_ids:
-            print(f"Deduplicated {curr_stats.duplicate_ids} duplicate Voter ID(s) in {to_path.name}.", file=sys.stderr)
+            print(f"Deduplicated {curr_stats.duplicate_ids} duplicate Voter ID(s) in {curr_path.name}.", file=sys.stderr)
 
-        rows, district_changes = compute_transition(from_date, to_date, prev_snap, curr_snap)
+        district_universe.update(d for d in curr_snap.id_to_district.values() if d)
+
+        added_by_district, removed_by_district, district_changes = compute_transition(prev_snap, curr_snap)
         district_change_total += district_changes
-        all_new_rows.extend(rows)
-        # Drop refs to free memory before next iteration
-        del prev_snap, curr_snap
+
+        transition_results.append((from_date, to_date, added_by_district, removed_by_district))
+        prev_snap = curr_snap
 
     if district_change_total:
         print(f"{district_change_total} Voter ID(s) had different senate district on consecutive dates.", file=sys.stderr)
 
-    if not initial_rows and not all_new_rows:
-        return 0
+    all_districts = sorted(district_universe)
+    initial_rows = compute_initial_rows(first_date, first_snap, all_districts)
 
-    # Sort rows: initial rows first (empty From_Date sorts first), then by From_Date, To_Date, Senate_District
-    all_rows_to_write = initial_rows + all_new_rows
-    all_rows_to_write.sort(key=lambda r: (r[0] or "0000-00-00", r[1], r[2]))
+    transition_rows: list[tuple[str, str, str, int, int]] = []
+    for from_date, to_date, added_by_district, removed_by_district in transition_results:
+        for district in all_districts:
+            transition_rows.append(
+                (
+                    from_date,
+                    to_date,
+                    district,
+                    added_by_district.get(district, 0),
+                    removed_by_district.get(district, 0),
+                )
+            )
 
-    if not csv_path.exists():
-        with csv_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(CSV_COLUMNS)
-            writer.writerows(all_rows_to_write)
-        msg_parts = []
-        if initial_rows:
-            msg_parts.append(f"{len(initial_rows)} initial row(s)")
-        if all_new_rows:
-            msg_parts.append(f"{len(all_new_rows)} transition row(s)")
-        print(f"Wrote {' and '.join(msg_parts)} to {csv_path}.")
-    else:
-        # If we have initial rows, we need to prepend them (they should be first)
-        # Otherwise just append transitions
-        if initial_rows:
-            # Prepend initial rows: read existing, write header + initial + existing
-            temp_path = csv_path.with_suffix(csv_path.suffix + ".tmp")
-            try:
-                with csv_path.open("r", newline="", encoding="utf-8") as inf:
-                    reader = csv.reader(inf)
-                    with temp_path.open("w", newline="", encoding="utf-8") as outf:
-                        writer = csv.writer(outf)
-                        next(reader, None)  # skip existing header
-                        writer.writerow(CSV_COLUMNS)
-                        # Write initial rows first
-                        for r in initial_rows:
-                            writer.writerow(r)
-                        # Then existing rows
-                        for row in reader:
-                            writer.writerow(row)
-                        # Then new transition rows
-                        for r in all_new_rows:
-                            writer.writerow(r)
-                temp_path.replace(csv_path)
-                msg_parts = []
-                if initial_rows:
-                    msg_parts.append(f"prepended {len(initial_rows)} initial row(s)")
-                if all_new_rows:
-                    msg_parts.append(f"appended {len(all_new_rows)} transition row(s)")
-                print(f"{' and '.join(msg_parts)} to {csv_path}.")
-            finally:
-                if temp_path.exists():
-                    temp_path.unlink(missing_ok=True)
-        else:
-            append_new_rows_to_csv(csv_path, all_new_rows)
-            print(f"Appended {len(all_new_rows)} rows to {csv_path}.")
+    all_rows_to_write = initial_rows + transition_rows
+
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(CSV_COLUMNS)
+        writer.writerows(all_rows_to_write)
+
+    print(
+        f"Wrote {len(initial_rows)} initial row(s) and {len(transition_rows)} transition row(s) to {csv_path}."
+    )
 
     return 0
 

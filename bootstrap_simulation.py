@@ -120,14 +120,13 @@ def load_data(csv_path: Path, removal_cutoff_date: date | None = None) -> Simula
         added_pools[district].append(added)
         
         # Only include removals from dates on or after cutoff (if specified)
-        if removed > 0:
-            if removal_cutoff_date is None:
-                # Include all removals
+        if removal_cutoff_date is None:
+            # Include all removals
+            removed_pools[district].append(removed)
+        else:
+            # Only include if To_Date is on or after cutoff (inclusive)
+            if not pd.isna(to_date) and to_date.date() >= removal_cutoff_date:
                 removed_pools[district].append(removed)
-            else:
-                # Only include if To_Date is on or after cutoff (inclusive)
-                if not pd.isna(to_date) and to_date.date() >= removal_cutoff_date:
-                    removed_pools[district].append(removed)
     
     # Convert defaultdicts to regular dicts
     added_pools = dict(added_pools)

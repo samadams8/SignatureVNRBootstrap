@@ -24,9 +24,10 @@ The workflow is:
   - For each **consecutive date pair** `(prev_date, curr_date)` it:
     - Finds voter IDs that appear only on the later date → counted as **Added** in the district shown on `curr_date`.
     - Finds voter IDs that disappear on the later date → counted as **Removed** from the district on `prev_date`.
-  - It writes/appends one row per district and date transition to `signature_changes_by_district.csv` with columns:
+  - It writes one row per district and date transition to `signature_changes_by_district.csv` with columns:
     - `(From_Date, To_Date, Senate_District, Added, Removed)`.
-  - Re‑running the script is idempotent over existing transitions: previously processed `(From_Date, To_Date)` pairs are skipped.
+  - Re‑running the script fully rebuilds the CSV from all discovered snapshots, ensuring historical consistency.
+  - Every date entry includes every district, including explicit `Added=0` and `Removed=0` rows when a district has no day-over-day change.
 
 This CSV is the single, versionable data source that drives both the descriptive figures and the bootstrap simulation.
 
@@ -213,10 +214,10 @@ python build_add_remove_table.py --html-dir HTMLs --csv signature_changes_by_dis
 ```
 
 - Discovers all `YYYY-MM-DD.html` files in `HTMLs/`.
-- Creates or updates `signature_changes_by_district.csv` with:
+- Rebuilds `signature_changes_by_district.csv` from all discovered snapshots with:
   - One initial row per district for the first date.
   - One row per district per consecutive date pair for added/removed counts.
-- Skips transitions that are already present, so it is safe to re‑run as new HTML snapshots arrive.
+- Includes explicit `0/0` rows for districts with no changes on a transition day.
 
 #### 2. Generate historical signature figures
 
