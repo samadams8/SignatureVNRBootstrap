@@ -43,6 +43,7 @@ class SimulationData(NamedTuple):
     removed_pools: dict[str, list[int]]  # District -> list of Removed values
     start_date: date  # Latest To_Date in CSV
     filtered_pools: dict[str, list[int]] | None  # District -> filtered Added values
+    historical_additions: dict[str, list[tuple[date, int]]] = None
 
 class SimulationResults(NamedTuple):
     """Results from a single simulation run."""
@@ -103,7 +104,17 @@ def load_data(csv_path: Path, removal_cutoff_date: date | None = None) -> Simula
     # Naive counts should represent CURRENT state (initial + all transitions)
     added_pools: dict[str, list[int]] = defaultdict(list)
     removed_pools: dict[str, list[int]] = defaultdict(list)
+    historical_additions: dict[str, list[tuple[date, int]]] = defaultdict(list)
     
+    # Parse To_Date for initial rows to get historical additions
+    initial_df["To_Date_parsed"] = pd.to_datetime(initial_df["To_Date"], errors="coerce")
+    for _, row in initial_df.iterrows():
+        district = row["Senate_District"]
+        added = int(row["Added"])
+        to_date = row["To_Date_parsed"]
+        if added > 0 and not pd.isna(to_date):
+            historical_additions[district].append((to_date.date(), added))
+            
     # Parse To_Date for filtering removals
     transitions_df["To_Date_parsed"] = pd.to_datetime(transitions_df["To_Date"], errors="coerce")
     
@@ -118,6 +129,10 @@ def load_data(csv_path: Path, removal_cutoff_date: date | None = None) -> Simula
         
         # Add to sampling pools (for future simulation)
         added_pools[district].append(added)
+        
+        # Add to historical additions
+        if added > 0 and not pd.isna(to_date):
+            historical_additions[district].append((to_date.date(), added))
         
         # Only include removals from dates on or after cutoff (if specified)
         if removal_cutoff_date is None:
@@ -147,7 +162,8 @@ def load_data(csv_path: Path, removal_cutoff_date: date | None = None) -> Simula
         added_pools=added_pools,
         removed_pools=removed_pools,
         start_date=start_date,
-        filtered_pools=None
+        filtered_pools=None,
+        historical_additions=dict(historical_additions)
     )
 
 def calculate_filter_thresholds(
@@ -334,6 +350,11 @@ def run_single_trial(
     # Phase 2: Signature Removals (start_date through removal_deadline)
     # Skip this phase if removals are disabled
     if not disable_removals:
+        if getattr(data, 'historical_additions', None):
+            for district in all_districts:
+                if district in data.historical_additions:
+                    verification_history[district].extend(data.historical_additions[district])
+                    
         for current_date in removal_days:
             for district in all_districts:
                 # Calculate removable pool: signatures verified within last removal_window_days (including same day)
@@ -483,6 +504,16 @@ def run_simulation(
                 side="left"
             )
             removable_pool_by_day = suffix_with_zero[:, clipped_cutoff_indices]
+
+        if getattr(data, 'historical_additions', None) and district in data.historical_additions:
+            hist_adds = data.historical_additions[district]
+            historical_removable_pool = np.zeros(n_removal_days, dtype=np.int64)
+            for day_idx, current_date in enumerate(removal_days):
+                cutoff_date = current_date - timedelta(days=removal_window_days - 1)
+                historical_removable_pool[day_idx] = sum(
+                    count for d, count in hist_adds if d >= cutoff_date
+                )
+            removable_pool_by_day += historical_removable_pool
 
         district_counts = final_counts_matrix[:, district_idx].copy()
         for day_idx in range(n_removal_days):
