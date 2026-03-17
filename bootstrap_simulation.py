@@ -972,7 +972,7 @@ def main() -> int:
     # Calculate bins that are always a particular width 
     min_val = min(statewide_totals) if statewide_totals else 0
     max_val = max(statewide_totals) if statewide_totals else 0
-    BIN_WIDTH = 1000
+    BIN_WIDTH = 500
     # Round down min to nearest BIN_WIDTH, round up max to nearest BIN_WIDTH
     bin_start = (min_val // BIN_WIDTH) * BIN_WIDTH
     bin_end = ((max_val + BIN_WIDTH - 1) // BIN_WIDTH) * BIN_WIDTH  # Round up to nearest BIN_WIDTH
